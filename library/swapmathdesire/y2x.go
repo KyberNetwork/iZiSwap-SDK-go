@@ -1,4 +1,4 @@
-package swapmath
+package swapmathdesire
 
 import (
 	"math/big"
@@ -24,11 +24,9 @@ type Y2XRangeRetState struct {
 	LiquidityX *big.Int
 }
 
-func Y2XAtPrice(amountY *big.Int, sqrtPrice_96 *big.Int, currX *big.Int) (costY, acquireX *big.Int) {
-	l := calc.MulDivFloor(amountY, utils.Pow96, sqrtPrice_96)
-	// acquireX <= currX <= uint128.max
-	acquireX = calc.MinBigInt(calc.MulDivFloor(l, utils.Pow96, sqrtPrice_96), currX)
-	l = calc.MulDivCeil(acquireX, sqrtPrice_96, utils.Pow96)
+func Y2XAtPrice(desireX *big.Int, sqrtPrice_96 *big.Int, currX *big.Int) (costY, acquireX *big.Int) {
+	acquireX = calc.MinBigInt(desireX, currX)
+	l := calc.MulDivCeil(acquireX, sqrtPrice_96, utils.Pow96)
 	costY = calc.MulDivCeil(l, sqrtPrice_96, utils.Pow96)
 	return costY, acquireX
 }
@@ -39,18 +37,19 @@ type Y2XAtPriceLiquidityResult struct {
 	NewLiquidityX *big.Int
 }
 
-func y2XAtPriceLiquidity(amountY *big.Int, sqrtPrice_96 *big.Int, liquidityX *big.Int) Y2XAtPriceLiquidityResult {
-	// amountY * TwoPower.Pow96 < 2^128 * 2^96 = 2^224 < 2^256
-	maxTransformLiquidityY := new(big.Int).Mul(amountY, utils.Pow96)
-	maxTransformLiquidityY.Div(maxTransformLiquidityY, sqrtPrice_96)
-	// transformLiquidityY <= liquidityX
+func y2XAtPriceLiquidity(desireX *big.Int, sqrtPrice_96 *big.Int, liquidityX *big.Int) Y2XAtPriceLiquidityResult {
+	maxTransformLiquidityY := calc.MulDivCeil(desireX, sqrtPrice_96, utils.Pow96)
 	transformLiquidityY := calc.MinBigInt(maxTransformLiquidityY, liquidityX)
-	// costY <= amountY
 	costY := calc.MulDivCeil(transformLiquidityY, sqrtPrice_96, utils.Pow96)
-	// transformLiquidityY * 2^96 < 2^224 < 2^256
-	acquireX := new(big.Int).Mul(transformLiquidityY, utils.Pow96)
-	acquireX.Div(acquireX, sqrtPrice_96)
+	acquireX := new(big.Int).Div(
+		new(big.Int).Mul(
+			transformLiquidityY,
+			utils.Pow96,
+		),
+		sqrtPrice_96,
+	)
 	newLiquidityX := new(big.Int).Sub(liquidityX, transformLiquidityY)
+
 	return Y2XAtPriceLiquidityResult{CostY: costY, AcquireX: acquireX, NewLiquidityX: newLiquidityX}
 }
 
@@ -71,46 +70,69 @@ type Y2XRangeCompRet struct {
 	SqrtLoc_96        *big.Int
 }
 
-func y2XRangeComplete(rg RangeY2X, amountY *big.Int) Y2XRangeCompRet {
+func y2XRangeComplete(rg RangeY2X, desireX *big.Int) Y2XRangeCompRet {
 	ret := Y2XRangeCompRet{}
-	maxY := amountmath.GetAmountY(rg.Liquidity, rg.SqrtPriceL_96, rg.SqrtPriceR_96, rg.SqrtRate_96, true)
-	if maxY.Cmp(amountY) <= 0 {
-		// ret.costY <= maxY <= uint128.max
-		ret.CostY = maxY
-		ret.AcquireX = amountmath.GetAmountX(rg.Liquidity, rg.LeftPt, rg.RightPt, rg.SqrtPriceR_96, rg.SqrtRate_96, false)
-		// we complete this liquidity segment
+
+	maxX := amountmath.GetAmountX(rg.Liquidity, rg.LeftPt, rg.RightPt, rg.SqrtPriceR_96, rg.SqrtRate_96, false)
+	if maxX.Cmp(desireX) <= 0 {
+		ret.AcquireX = new(big.Int).Set(maxX)
+		ret.CostY = amountmath.GetAmountY(rg.Liquidity, rg.SqrtPriceL_96, rg.SqrtPriceR_96, rg.SqrtRate_96, true)
 		ret.CompleteLiquidity = true
-	} else {
-		// we should locate highest price
-		// uint160 is enough for muldiv and adding, because amountY < maxY
-		sqrtLoc_96 := calc.MulDivFloor(amountY, new(big.Int).Sub(rg.SqrtRate_96, utils.Pow96), rg.Liquidity)
-		sqrtLoc_96.Add(sqrtLoc_96, rg.SqrtPriceL_96)
-		ret.LocPt, _ = calc.GetLogSqrtPriceFloor(sqrtLoc_96)
 
-		ret.LocPt = calc.Max(rg.LeftPt, ret.LocPt)
-		ret.LocPt = calc.Min(rg.RightPt-1, ret.LocPt)
-
-		ret.CompleteLiquidity = false
-		ret.SqrtLoc_96, _ = calc.GetSqrtPrice(ret.LocPt)
-		if ret.LocPt == rg.LeftPt {
-			ret.CostY = big.NewInt(0)
-			ret.AcquireX = big.NewInt(0)
-			return ret
-		}
-
-		costY256 := amountmath.GetAmountY(rg.Liquidity, rg.SqrtPriceL_96, ret.SqrtLoc_96, rg.SqrtRate_96, true)
-		// ret.costY <= amountY <= uint128.max
-		ret.CostY = calc.MinBigInt(costY256, amountY)
-
-		// costY <= amountY even if the costY is the upperbound of the result
-		// because amountY is not a real and sqrtLoc_96 <= sqrtLoc256_96
-		ret.AcquireX = amountmath.GetAmountX(rg.Liquidity, rg.LeftPt, ret.LocPt, ret.SqrtLoc_96, rg.SqrtRate_96, false)
-
+		return ret
 	}
+
+	sqrtPricePrPl_96, _ := calc.GetSqrtPrice(rg.RightPt - rg.LeftPt)
+	sqrtPricePrM1_96 := new(big.Int).Div(
+		new(big.Int).Mul(rg.SqrtPriceR_96, utils.Pow96),
+		rg.SqrtRate_96,
+	)
+	div := new(big.Int).Sub(
+		sqrtPricePrPl_96,
+		calc.MulDivFloor(desireX, new(big.Int).Sub(rg.SqrtPriceR_96, sqrtPricePrM1_96), rg.Liquidity),
+	)
+	sqrtPriceLoc_96 := new(big.Int).Div(
+		new(big.Int).Mul(rg.SqrtPriceR_96, utils.Pow96),
+		div,
+	)
+
+	ret.CompleteLiquidity = false
+	ret.LocPt, _ = calc.GetLogSqrtPriceFloor(sqrtPriceLoc_96)
+	ret.LocPt = calc.Max(rg.LeftPt, ret.LocPt)
+	ret.LocPt = calc.Min(rg.RightPt-1, ret.LocPt)
+	ret.SqrtLoc_96, _ = calc.GetSqrtPrice(ret.LocPt)
+
+	if ret.LocPt == rg.LeftPt {
+		ret.AcquireX = big.NewInt(0)
+		ret.CostY = big.NewInt(0)
+		return ret
+	}
+
+	ret.CompleteLiquidity = false
+	ret.AcquireX = calc.MinBigInt(
+		amountmath.GetAmountX(
+			rg.Liquidity,
+			rg.LeftPt,
+			ret.LocPt,
+			ret.SqrtLoc_96,
+			rg.SqrtRate_96,
+			false,
+		),
+		desireX,
+	)
+
+	ret.CostY = amountmath.GetAmountY(
+		rg.Liquidity,
+		rg.SqrtPriceL_96,
+		ret.SqrtLoc_96,
+		rg.SqrtRate_96,
+		true,
+	)
+
 	return ret
 }
 
-func Y2XRange(currentState utils.State, rightPt int, sqrtRate_96 *big.Int, amountY *big.Int) Y2XRangeRetState {
+func Y2XRange(currentState utils.State, rightPt int, sqrtRate_96 *big.Int, desireX *big.Int) Y2XRangeRetState {
 	retState := Y2XRangeRetState{
 		CostY:      big.NewInt(0),
 		AcquireX:   big.NewInt(0),
@@ -118,27 +140,25 @@ func Y2XRange(currentState utils.State, rightPt int, sqrtRate_96 *big.Int, amoun
 		LiquidityX: big.NewInt(0),
 	}
 
-	// first, if current point is not all x, we can not move right directly
 	startHasY := currentState.LiquidityX.Cmp(currentState.Liquidity) < 0
 	if startHasY {
-		ret := y2XAtPriceLiquidity(amountY, currentState.SqrtPrice_96, currentState.LiquidityX)
+		ret := y2XAtPriceLiquidity(desireX, currentState.SqrtPrice_96, currentState.LiquidityX)
 		retState.LiquidityX = ret.NewLiquidityX
 		retState.CostY = ret.CostY
 		retState.AcquireX = ret.AcquireX
-		if retState.LiquidityX.Cmp(new(big.Int)) > 0 || retState.CostY.Cmp(amountY) >= 0 {
+		if retState.LiquidityX.Cmp(new(big.Int)) > 0 || retState.AcquireX.Cmp(desireX) >= 0 {
 			retState.Finished = true
 			retState.FinalPt = currentState.CurrentPoint
 			retState.SqrtFinalPrice_96 = currentState.SqrtPrice_96
 			return retState
 		} else {
-			amountY.Sub(amountY, retState.CostY)
+			desireX.Sub(desireX, retState.AcquireX)
 			currentState.CurrentPoint += 1
 			if currentState.CurrentPoint == rightPt {
 				retState.FinalPt = currentState.CurrentPoint
 				retState.SqrtFinalPrice_96, _ = calc.GetSqrtPrice(rightPt)
 				return retState
 			}
-			// sqrt(price) + sqrt(price) * (1.0001 - 1) == sqrt(price) * 1.0001
 			mulDelta := new(big.Int).Mul(currentState.SqrtPrice_96, new(big.Int).Sub(sqrtRate_96, utils.Pow96))
 			mulDeltaDiv := new(big.Int).Div(mulDelta, utils.Pow96)
 			currentState.SqrtPrice_96 = new(big.Int).Add(currentState.SqrtPrice_96, mulDeltaDiv)
@@ -146,8 +166,6 @@ func Y2XRange(currentState utils.State, rightPt int, sqrtRate_96 *big.Int, amoun
 	}
 
 	sqrtPriceR_96, _ := calc.GetSqrtPrice(rightPt)
-
-	// (uint128 liquidCostY, uint256 liquidAcquireX, bool liquidComplete, int24 locPt, uint160 sqrtLoc_96)
 	ret := y2XRangeComplete(
 		RangeY2X{
 			Liquidity:     currentState.Liquidity,
@@ -157,29 +175,27 @@ func Y2XRange(currentState utils.State, rightPt int, sqrtRate_96 *big.Int, amoun
 			RightPt:       rightPt,
 			SqrtRate_96:   sqrtRate_96,
 		},
-		amountY,
+		desireX,
 	)
-
 	retState.CostY.Add(retState.CostY, ret.CostY)
-	amountY.Sub(amountY, ret.CostY)
 	retState.AcquireX.Add(retState.AcquireX, ret.AcquireX)
+	desireX.Sub(desireX, ret.AcquireX)
+
 	if ret.CompleteLiquidity {
-		retState.Finished = amountY.Cmp(big.NewInt(0)) == 0
+		retState.Finished = desireX.Cmp(big.NewInt(0)) == 0
 		retState.FinalPt = rightPt
 		retState.SqrtFinalPrice_96 = sqrtPriceR_96
 	} else {
-
-		//locCostY, locAcquireX, retState.LiquidityX =
-		locRet := y2XAtPriceLiquidity(amountY, ret.SqrtLoc_96, currentState.Liquidity)
+		locRet := y2XAtPriceLiquidity(desireX, ret.SqrtLoc_96, currentState.Liquidity)
 		locCostY := locRet.CostY
 		locAcquireX := locRet.AcquireX
 		retState.LiquidityX = locRet.NewLiquidityX
-
 		retState.CostY.Add(retState.CostY, locCostY)
 		retState.AcquireX.Add(retState.AcquireX, locAcquireX)
 		retState.Finished = true
-		retState.SqrtFinalPrice_96 = ret.SqrtLoc_96
 		retState.FinalPt = ret.LocPt
+		retState.SqrtFinalPrice_96 = ret.SqrtLoc_96
 	}
+
 	return retState
 }
